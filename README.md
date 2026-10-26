@@ -1,5 +1,21 @@
 # Metacritic games catalog service
 
+An async Python service that collects new games from Metacritic, stores platform-level
+ratings, and presents a searchable catalog with separate critic and user review summaries.
+It also includes background retries, similar-game recommendations, optional YouTube
+enrichment, and live worker monitoring.
+
+```mermaid
+flowchart LR
+    MC[Metacritic] --> W[Scheduled worker]
+    W --> DB[(PostgreSQL + pgvector)]
+    W --> OR[OpenRouter]
+    W -. optional .-> YT[YouTube captions]
+    B[Browser] <--> API[FastAPI catalog and monitor]
+    API <--> DB
+    W --> DB
+```
+
 ## Local setup
 ```bash
 python -m venv .venv && . .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -21,6 +37,11 @@ For a server deployment, set a unique `POSTGRES_PASSWORD`, `POSTGRES_USER`, and 
 in `.env` before starting Compose. Set `OPENROUTER_API_KEY` there to enable generated review
 summaries and letsplay conclusions; configure `METACRITIC_PROXY` if the host requires a proxy.
 Do not commit `.env`; `.gitignore` and `.dockerignore` exclude it.
+For a shared demo, set both `DEMO_AUTH_USERNAME` and `DEMO_AUTH_PASSWORD` in `.env`.
+The application then requires HTTP Basic Auth on the catalog, monitoring pages, API, and live
+event stream. Use a password with at least 16 characters and share it with reviewers separately
+from the public URL. `/health` is intentionally unauthenticated for the container healthcheck.
+Leaving both settings empty keeps the local development server open.
 For a faster catalog-focused demo, set `YOUTUBE_ENRICHMENT_ENABLED=false`; the default is
 `true` so normal crawls still include the optional YouTube feature.
 
@@ -134,6 +155,24 @@ immediately: the provider's `Retry-After` value and an exponential cooldown are 
 the pending queue to avoid repeatedly hitting a rate limit. The worker persists unfinished
 summaries and retries them without repeating the Metacritic crawl. A provider quota or rate
 limit still needs to be resolved at the configured LLM provider for summaries to complete.
+
+## AI summary evaluation
+The evaluation dataset in `evals/review_summary_cases.json` uses invented review text and
+covers balanced feedback, positive-only feedback, and an instruction-injection attempt embedded
+in a review. Validate the dataset without contacting an LLM provider:
+```bash
+python -m scripts.evaluate_summaries --dry-run
+```
+
+Run the cases against the configured model and save a JSON report:
+```bash
+python -m scripts.evaluate_summaries --output evaluation-report.json
+```
+
+The report measures coverage of predefined phrase alternatives, checks for selected unsupported
+claims, and enforces expected empty feedback lists. These are heuristic regression signals, not
+a proof of factuality or a replacement for human review. Live evaluation makes one provider
+request per case and may be delayed by provider rate limits.
 
 ## Hourly crawler
 ```bash

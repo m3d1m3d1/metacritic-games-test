@@ -4,7 +4,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
+from app.config import settings
 from app.db.session import get_session
 from app.main import _worker_payload, app
 
@@ -115,6 +117,54 @@ def test_worker_payload_marks_stale_worker_offline():
         error=None,
     )
     assert _worker_payload([worker])[0]["state"] == "offline"
+
+
+def test_demo_basic_auth_protects_application_but_allows_health(monkeypatch):
+    monkeypatch.setattr(settings, "demo_auth_username", "demo-reviewer")
+    monkeypatch.setattr(
+        settings,
+        "demo_auth_password",
+        SecretStr("a-long-demo-password"),
+    )
+
+    with TestClient(app) as test_client:
+        assert test_client.get("/health").status_code == 200
+
+        for path in (
+            "/",
+            "/monitor",
+            "/api/monitor/status",
+            "/api/monitor/events",
+            "/api/crawl-runs",
+            "/api/games/demo-game/translation",
+            "/docs",
+            "/openapi.json",
+        ):
+            denied = test_client.get(path)
+            assert denied.status_code == 401
+            assert denied.headers["www-authenticate"] == (
+                'Basic realm="Metacritic Games"'
+            )
+
+        wrong_password = test_client.get(
+            "/openapi.json",
+            auth=("demo-reviewer", "incorrect-password"),
+        )
+        assert wrong_password.status_code == 401
+
+        allowed = test_client.get(
+            "/openapi.json",
+            auth=("demo-reviewer", "a-long-demo-password"),
+        )
+        assert allowed.status_code == 200
+
+
+def test_demo_basic_auth_is_disabled_when_credentials_are_unset(monkeypatch):
+    monkeypatch.setattr(settings, "demo_auth_username", None)
+    monkeypatch.setattr(settings, "demo_auth_password", None)
+
+    with TestClient(app) as test_client:
+        assert test_client.get("/openapi.json").status_code == 200
 
 
 def _async_workers(workers):

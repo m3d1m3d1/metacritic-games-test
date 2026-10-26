@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import DemoBasicAuthMiddleware
 from app.config import current_day, settings
 from app.db import repo
 from app.db.models import CrawlRun, Game, WorkerLog, WorkerStatus
@@ -20,7 +21,13 @@ from app.db.session import SessionLocal, get_session
 from app.llm import ReviewSummaryRateLimited, translate_game_content
 
 app = FastAPI(title="Metacritic Games", version="0.1.0")
+app.add_middleware(DemoBasicAuthMiddleware)
 logger = logging.getLogger(__name__)
+
+
+@app.get("/health", include_in_schema=False)
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 def _format_datetime(value: datetime | None) -> str:
