@@ -1,0 +1,80 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-games}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-games}
+      POSTGRES_DB: ${POSTGRES_DB:-games}
+    command: postgres -c shared_buffers=128MB -c max_connections=50
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: &app-environment
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-games}:${POSTGRES_PASSWORD:-games}@db:5432/${POSTGRES_DB:-games}
+      CRAWL_BATCH_SIZE: ${CRAWL_BATCH_SIZE:-20}
+      CRAWL_INTERVAL_MINUTES: ${CRAWL_INTERVAL_MINUTES:-60}
+      CRAWL_QUEUE_POLL_SECONDS: ${CRAWL_QUEUE_POLL_SECONDS:-5}
+      CRAWL_MAX_FAILURES_PER_DAY: ${CRAWL_MAX_FAILURES_PER_DAY:-2}
+      METACRITIC_MAX_CONCURRENCY: ${METACRITIC_MAX_CONCURRENCY:-2}
+      TIMEZONE: ${TIMEZONE:-UTC}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      LLM_API_KEY: ${LLM_API_KEY:-${OPENROUTER_API_KEY:-}}
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-https://openrouter.ai/api/v1}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-nvidia/nemotron-3.5-super-vl:free}
+      SUMMARY_FALLBACK_MODELS: ${SUMMARY_FALLBACK_MODELS-google/gemma-4-26b-a4b-it:free,google/gemma-4-31b-it:free}
+      METACRITIC_PROXY: ${METACRITIC_PROXY:-}
+      YOUTUBE_ENRICHMENT_ENABLED: ${YOUTUBE_ENRICHMENT_ENABLED:-true}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  web:
+    build:
+      context: .
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *app-environment
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/monitor/status', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+    command: ["python", "-m", "app.worker"]
+    environment: *app-environment
+    volumes:
+      - fastembed-cache:/home/app/.cache
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  fastembed-cache:
