@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -8,7 +9,14 @@ from pydantic import SecretStr
 
 from app.config import settings
 from app.db.session import get_session
-from app.main import _worker_payload, app
+from app.main import (
+    _COVER_CACHE,
+    _COVER_IN_FLIGHT,
+    _cached_cover,
+    _fetch_cover,
+    _worker_payload,
+    app,
+)
 
 
 @pytest.fixture
@@ -197,7 +205,7 @@ def test_catalog_renders_search_platform_filter_and_ratings(client, monkeypatch)
     game = SimpleNamespace(
         slug="demo-game",
         title="Demo & Game",
-        cover_url=None,
+        cover_url="https://www.metacritic.com/a/img/catalog/example.jpg",
         best_metascore=88,
         best_userscore=8.4,
         genres=["Action"],
@@ -221,6 +229,8 @@ def test_catalog_renders_search_platform_filter_and_ratings(client, monkeypatch)
     assert response.status_code == 200
     assert "Demo &amp; Game" in response.text
     assert "88" in response.text
+    assert "<img src='/images/demo-game'" in response.text
+    assert "src='https://www.metacritic.com/" not in response.text
     assert "value='pc' selected" in response.text
     assert (
         "href='/games/demo-game?q=Demo&amp;platform=pc&amp;sort=userscore"
@@ -228,11 +238,164 @@ def test_catalog_renders_search_platform_filter_and_ratings(client, monkeypatch)
     ) in response.text
 
 
+def test_game_cover_is_served_from_application_and_supports_conditional_cache(
+    client, monkeypatch
+):
+    cover_url = "https://www.metacritic.com/a/img/catalog/example.jpg"
+    fetches = []
+
+    async def cover_url_for_slug(session, slug):
+        assert slug == "demo-game"
+        return cover_url
+
+    async def cached_cover(url):
+        fetches.append(url)
+        return b"fake-image-content", "image/jpeg", '"abc123"'
+
+    monkeypatch.setattr("app.main._cover_url_for_slug", cover_url_for_slug)
+    monkeypatch.setattr("app.main._cached_cover", cached_cover)
+
+    response = client.get("/images/demo-game")
+    not_modified = client.get(
+        "/images/demo-game",
+        headers={"If-None-Match": '"abc123"'},
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"fake-image-content"
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.headers["cache-control"].startswith("private, max-age=86400")
+    assert response.headers["etag"] == '"abc123"'
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert not_modified.status_code == 304
+    assert fetches == [cover_url, cover_url]
+
+
+def test_game_cover_rejects_non_metacritic_urls(client, monkeypatch):
+    cover_url = "http://127.0.0.1/internal"
+    fetches = []
+
+    async def cover_url_for_slug(session, slug):
+        return cover_url
+
+    async def fetch_cover(url):
+        fetches.append(url)
+        raise AssertionError("Invalid image URL must be rejected before fetching")
+
+    monkeypatch.setattr("app.main._cover_url_for_slug", cover_url_for_slug)
+    monkeypatch.setattr("app.main._fetch_cover", fetch_cover)
+
+    response = client.get("/images/demo-game")
+
+    assert response.status_code == 502
+    assert fetches == []
+
+
+@pytest.mark.asyncio
+async def test_cached_cover_coalesces_concurrent_requests(monkeypatch):
+    import app.main as main
+
+    url = "https://www.metacritic.com/a/img/catalog/concurrent.jpg"
+    _COVER_CACHE.pop(url, None)
+    _COVER_IN_FLIGHT.pop(url, None)
+    fetches = []
+
+    async def fetch_cover(requested_url):
+        fetches.append(requested_url)
+        await asyncio.sleep(0)
+        return b"cached-image", "image/webp", '"etag"'
+
+    monkeypatch.setattr(main, "_fetch_cover", fetch_cover)
+
+    results = await asyncio.gather(*(_cached_cover(url) for _ in range(8)))
+
+    assert results == [(b"cached-image", "image/webp", '"etag"')] * 8
+    assert fetches == [url]
+    _COVER_CACHE.pop(url, None)
+    main._COVER_CACHE_BYTES -= len(b"cached-image")
+
+
+@pytest.mark.asyncio
+async def test_fetch_cover_uses_browser_headers_and_accepts_image(monkeypatch):
+    import app.main as main
+
+    url = "https://www.metacritic.com/a/img/catalog/test-cover.jpg"
+    calls = []
+
+    class FakeResponse:
+        is_redirect = False
+        headers = {"content-type": "image/jpeg"}
+        request = httpx.Request("GET", url)
+        content = b"cover-bytes"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, requested_url):
+            calls.append(requested_url)
+            return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeClient)
+
+    content, content_type, etag = await _fetch_cover(url)
+
+    assert content == b"cover-bytes"
+    assert content_type == "image/jpeg"
+    assert etag == '"9a0f821fde188ef603685fbc02801d6fdeb281a270bc4cec06512703ab8dae1f"'
+    assert calls[0]["headers"]["User-Agent"] == main.DEFAULT_HEADERS["User-Agent"]
+    assert calls[0]["proxy"] == main.settings.metacritic_proxy
+    assert calls[1] == url
+
+
+@pytest.mark.asyncio
+async def test_fetch_cover_rejects_redirect_to_non_metacritic_host(monkeypatch):
+    import app.main as main
+
+    url = "https://www.metacritic.com/a/img/catalog/test-cover.jpg"
+    calls = []
+
+    class FakeResponse:
+        is_redirect = True
+        headers = {"location": "https://127.0.0.1/internal"}
+        request = httpx.Request("GET", url)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, requested_url):
+            calls.append(requested_url)
+            return FakeResponse()
+
+    monkeypatch.setattr(main.httpx, "AsyncClient", FakeClient)
+
+    with pytest.raises(ValueError, match="allowed Metacritic image URL"):
+        await _fetch_cover(url)
+
+    assert calls == [url]
+
+
 def test_game_detail_renders_reviews_and_similar_links(client, monkeypatch):
     game = SimpleNamespace(
         slug="demo-game",
         title="Demo Game",
-        cover_url=None,
+        cover_url="https://www.metacritic.com/a/img/catalog/demo-game.jpg",
         best_metascore=88,
         best_userscore=8.4,
         release_date=date(2026, 10, 16),
@@ -296,6 +459,7 @@ def test_game_detail_renders_reviews_and_similar_links(client, monkeypatch):
 
     assert response.status_code == 200
     assert "A game description." in response.text
+    assert "<img class='hero-cover' src='/images/demo-game'" in response.text
     assert "Critics like the combat." in response.text
     assert "Пользователи" in response.text
     assert "/games/similar-game" in response.text

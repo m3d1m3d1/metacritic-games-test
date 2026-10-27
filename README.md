@@ -94,6 +94,10 @@ are ranked by embedding distance when vectors exist; until then, matching genres
 Game cards keep the active catalog filters and sorting in their links. Detail pages have
 fixed previous/next arrows that follow that same filtered and sorted result set, including
 across catalog pages; the catalog return link preserves the current query.
+Cover images are fetched server-side from Metacritic through `METACRITIC_PROXY` when configured,
+and served from the same origin as the app. A bounded in-memory cache and browser ETags avoid
+re-downloading unchanged covers; browsers do not need direct access to Metacritic's image CDN.
+Only stored HTTPS image URLs on Metacritic hosts are accepted by the image endpoint.
 The detail page includes platform scores, description, video link, and available critic/user
 review summaries. The crawler also searches the first 10 YouTube gameplay/letsplay results,
 selects the result with the highest reported view count, and uses available English or Russian

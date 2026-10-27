@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import DemoBasicAuthMiddleware
@@ -19,15 +28,169 @@ from app.db import repo
 from app.db.models import CrawlRun, Game, WorkerLog, WorkerStatus
 from app.db.session import SessionLocal, get_session
 from app.llm import ReviewSummaryRateLimited, translate_game_content
+from app.scraper.client import DEFAULT_HEADERS
 
 app = FastAPI(title="Metacritic Games", version="0.1.0")
 app.add_middleware(DemoBasicAuthMiddleware)
 logger = logging.getLogger(__name__)
 
+_COVER_CACHE_LIMIT = 128
+_COVER_MAX_BYTES = 8 * 1024 * 1024
+_COVER_CACHE_BYTES_LIMIT = 64 * 1024 * 1024
+_COVER_CACHE: OrderedDict[str, tuple[bytes, str, str]] = OrderedDict()
+_COVER_CACHE_BYTES = 0
+_COVER_IN_FLIGHT: dict[str, asyncio.Task[tuple[bytes, str, str]]] = {}
+_COVER_CACHE_LOCK = asyncio.Lock()
+_COVER_FETCH_SEMAPHORE = asyncio.Semaphore(4)
+_COVER_ALLOWED_HOSTS = {"metacritic.com", "www.metacritic.com"}
+_IMAGE_HEADERS = {
+    **DEFAULT_HEADERS,
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    "Referer": "https://www.metacritic.com/",
+}
+
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/images/{slug}", include_in_schema=False)
+async def game_cover(
+    slug: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    cover_url = await _cover_url_for_slug(session, slug)
+    if not cover_url:
+        raise HTTPException(status_code=404, detail="Game cover not found")
+    try:
+        content, content_type, etag = await _cached_cover(cover_url)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            "Unable to load cover for %s (%s)",
+            slug,
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Обложка временно недоступна. Попробуйте позже.",
+        ) from exc
+
+    headers = {
+        "Cache-Control": "private, max-age=86400, stale-if-error=604800",
+        "ETag": etag,
+        "X-Content-Type-Options": "nosniff",
+    }
+    if etag in {
+        value.strip()
+        for value in request.headers.get("if-none-match", "").split(",")
+    } or "*" in request.headers.get("if-none-match", "").split(","):
+        return Response(status_code=304, headers=headers)
+    return Response(content, media_type=content_type, headers=headers)
+
+
+async def _cover_url_for_slug(session: AsyncSession, slug: str) -> str | None:
+    return await session.scalar(select(Game.cover_url).where(Game.slug == slug))
+
+
+def _validate_cover_url(url: str) -> None:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _COVER_ALLOWED_HOSTS
+        or not parsed.path.startswith("/a/img/")
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("Stored cover URL is not an allowed Metacritic image URL")
+
+
+async def _fetch_cover(url: str) -> tuple[bytes, str, str]:
+    current_url = url
+    async with _COVER_FETCH_SEMAPHORE:
+        async with httpx.AsyncClient(
+            timeout=20,
+            follow_redirects=False,
+            proxy=settings.metacritic_proxy,
+            headers=_IMAGE_HEADERS,
+        ) as client:
+            for redirect_count in range(4):
+                _validate_cover_url(current_url)
+                response = await client.get(current_url)
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location or redirect_count == 3:
+                        raise httpx.TooManyRedirects(
+                            "Image provider returned too many redirects",
+                            request=response.request,
+                        )
+                    current_url = urljoin(current_url, location)
+                    continue
+                response.raise_for_status()
+                content_type = (
+                    response.headers.get("content-type", "")
+                    .split(";", 1)[0]
+                    .lower()
+                )
+                if content_type not in {
+                    "image/avif",
+                    "image/gif",
+                    "image/jpeg",
+                    "image/png",
+                    "image/webp",
+                }:
+                    raise ValueError("Metacritic cover response is not a supported image")
+                content = response.content
+                if not content or len(content) > _COVER_MAX_BYTES:
+                    raise ValueError("Metacritic cover response has an invalid size")
+                etag = '"' + hashlib.sha256(content).hexdigest() + '"'
+                return content, content_type, etag
+    raise httpx.TooManyRedirects("Image provider returned too many redirects")
+
+
+async def _cached_cover(url: str) -> tuple[bytes, str, str]:
+    _validate_cover_url(url)
+    async with _COVER_CACHE_LOCK:
+        cached = _COVER_CACHE.get(url)
+        if cached is not None:
+            _COVER_CACHE.move_to_end(url)
+            return cached
+        task = _COVER_IN_FLIGHT.get(url)
+        if task is None:
+            task = asyncio.create_task(_fetch_cover(url))
+            _COVER_IN_FLIGHT[url] = task
+
+    try:
+        result = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        async with _COVER_CACHE_LOCK:
+            if _COVER_IN_FLIGHT.get(url) is task:
+                del _COVER_IN_FLIGHT[url]
+        raise
+    except Exception:
+        async with _COVER_CACHE_LOCK:
+            if _COVER_IN_FLIGHT.get(url) is task:
+                del _COVER_IN_FLIGHT[url]
+        raise
+
+    global _COVER_CACHE_BYTES
+    async with _COVER_CACHE_LOCK:
+        if _COVER_IN_FLIGHT.get(url) is task:
+            del _COVER_IN_FLIGHT[url]
+        previous = _COVER_CACHE.pop(url, None)
+        if previous is not None:
+            _COVER_CACHE_BYTES -= len(previous[0])
+        _COVER_CACHE[url] = result
+        _COVER_CACHE_BYTES += len(result[0])
+        _COVER_CACHE.move_to_end(url)
+        while (
+            len(_COVER_CACHE) > _COVER_CACHE_LIMIT
+            or _COVER_CACHE_BYTES > _COVER_CACHE_BYTES_LIMIT
+        ):
+            _, evicted = _COVER_CACHE.popitem(last=False)
+            _COVER_CACHE_BYTES -= len(evicted[0])
+    return result
 
 
 def _format_datetime(value: datetime | None) -> str:
@@ -345,6 +508,10 @@ def _game_url(
     return url
 
 
+def _cover_image_url(slug: str) -> str:
+    return f"/images/{quote(slug, safe='')}"
+
+
 def render_game_list(
     games: list[Game],
     platforms: list[tuple[str, str | None]],
@@ -360,7 +527,8 @@ def render_game_list(
     cards = []
     for game in games:
         image = (
-            f"<img src='{html.escape(game.cover_url, quote=True)}' alt='' loading='lazy'>"
+            f"<img src='{html.escape(_cover_image_url(game.slug), quote=True)}' "
+            "alt='' loading='lazy'>"
             if game.cover_url
             else "<div class='cover-placeholder'>Нет обложки</div>"
         )
@@ -463,7 +631,8 @@ def render_game_detail(
     page: int = 1,
 ) -> str:
     cover = (
-        f"<img class='hero-cover' src='{html.escape(game.cover_url, quote=True)}' alt='Обложка {html.escape(game.title, quote=True)}'>"
+        f"<img class='hero-cover' src='{html.escape(_cover_image_url(game.slug), quote=True)}' "
+        f"alt='Обложка {html.escape(game.title, quote=True)}'>"
         if game.cover_url
         else ""
     )
