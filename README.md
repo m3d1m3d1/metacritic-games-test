@@ -9,7 +9,7 @@ enrichment, and live worker monitoring.
 flowchart LR
     MC[Metacritic] --> W[Scheduled worker]
     W --> DB[(PostgreSQL + pgvector)]
-    W --> OR[OpenRouter]
+    W --> LLM[Groq]
     W -. optional .-> YT[YouTube captions]
     B[Browser] <--> API[FastAPI catalog and monitor]
     API <--> DB
@@ -34,7 +34,7 @@ The web port and PostgreSQL port bind to localhost by default. A reverse proxy c
 the `web:8000` service on the Compose network.
 
 For a server deployment, set a unique `POSTGRES_PASSWORD`, `POSTGRES_USER`, and `POSTGRES_DB`
-in `.env` before starting Compose. Set `OPENROUTER_API_KEY` there to enable generated review
+in `.env` before starting Compose. Set `GROQ_API_KEY` there to enable generated review
 summaries and letsplay conclusions; configure `METACRITIC_PROXY` if the host requires a proxy.
 Do not commit `.env`; `.gitignore` and `.dockerignore` exclude it.
 For a shared demo, set both `DEMO_AUTH_USERNAME` and `DEMO_AUTH_PASSWORD` in `.env`.
@@ -138,27 +138,23 @@ letsplay, and cached translation columns before starting web and worker processe
 Compose runs this migration once via the `migrate` service before either application service
 starts.
 
-Review summaries use an OpenAI-compatible Chat Completions API. The default configuration is
-OpenRouter; set `OPENROUTER_API_KEY` in `.env`, and configure `LLM_API_BASE_URL` and
-`SUMMARY_MODEL` as needed. `LLM_API_KEY` and the legacy `SILICONFLOW_API_KEY` are also accepted.
-The default model is `nvidia/nemotron-3.5-super-vl:free`. `SUMMARY_FALLBACK_MODELS` configures
-the ordered OpenRouter fallback list; by default it contains two other free models. Requests
-use OpenRouter's `models` routing so fallback happens server-side on rate limits and outages.
-OpenRouter allows at most three entries in one `models` request, including the primary model.
-LLM requests use low reasoning effort and exclude hidden reasoning from the response so the
-configured output-token budget is available for the requested JSON result.
-The primary model and every fallback must end in `:free`; paid models are rejected for the
-OpenRouter route to prevent accidental charges. Set `SUMMARY_FALLBACK_MODELS` to an empty value
-to disable fallbacks while retaining the free-only primary-model check. Summaries are generated separately for
+Review summaries use an OpenAI-compatible Chat Completions API. The default provider is Groq;
+set `GROQ_API_KEY` in `.env` to enable generated review summaries and letsplay conclusions.
+The default endpoint is `https://api.groq.com/openai/v1` and the default model is
+`openai/gpt-oss-120b`; configure `LLM_API_BASE_URL` and `SUMMARY_MODEL` to use another
+OpenAI-compatible provider. Groq requests use JSON-object mode for review summaries and do not
+send OpenRouter-specific fallback or reasoning parameters. `LLM_API_KEY`, `OPENROUTER_API_KEY`,
+and the legacy `SILICONFLOW_API_KEY` remain accepted when configuring the application directly.
+Summaries are generated separately for
 critic and user reviews on the lead platform, using the review page's first page (up to 10
 critic reviews and 50 user reviews). The source hash prevents repeat API calls when those
 reviews have not changed. Review text is queued for background summarization so catalog
-collection does not wait for OpenRouter. Transient API errors and invalid or empty model
+collection does not wait for Groq. Transient API errors and invalid or empty model
 responses are retried up to three times with backoff. HTTP 429 responses are not retried
 immediately: the provider's `Retry-After` value and an exponential cooldown are applied to
 the pending queue to avoid repeatedly hitting a rate limit. The worker persists unfinished
-summaries and retries them without repeating the Metacritic crawl. A provider quota or rate
-limit still needs to be resolved at the configured LLM provider for summaries to complete.
+summaries and retries them without repeating the Metacritic crawl. A provider quota or rate limit still needs to be resolved at the configured LLM provider for
+summaries to complete.
 
 ## AI summary evaluation
 The evaluation dataset in `evals/review_summary_cases.json` uses invented review text and

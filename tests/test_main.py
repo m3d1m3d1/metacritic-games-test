@@ -563,7 +563,7 @@ def test_game_translation_reports_invalid_provider_key(client, monkeypatch):
     response = client.post("/api/games/demo-game/translation")
 
     assert response.status_code == 503
-    assert "OpenRouter отклонил API-ключ (401)" in response.json()["detail"]
+    assert "Провайдер отклонил API-ключ (401)" in response.json()["detail"]
 
 
 def test_game_detail_returns_404_for_unknown_slug(client, monkeypatch):

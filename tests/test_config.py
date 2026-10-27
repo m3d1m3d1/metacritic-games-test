@@ -45,3 +45,18 @@ def test_demo_auth_password_is_kept_secret():
     )
     assert settings.demo_auth_password.get_secret_value() == "a-strong-password-123"
     assert "a-strong-password-123" not in repr(settings)
+
+
+def test_groq_is_the_default_llm_provider():
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_api_base_url == "https://api.groq.com/openai/v1"
+    assert settings.summary_model == "openai/gpt-oss-120b"
+
+
+def test_groq_api_key_takes_precedence_over_legacy_keys(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    monkeypatch.setenv("LLM_API_KEY", "legacy-test-key")
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_api_key == "groq-test-key"

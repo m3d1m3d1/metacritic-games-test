@@ -6,6 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -107,6 +108,21 @@ async def summarize_letsplay(title: str, transcript: str) -> str:
     completion_url = (
         base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     )
+    hostname = urlsplit(settings.llm_api_base_url).hostname
+    uses_openrouter = hostname == "openrouter.ai" or (
+        hostname is not None and hostname.endswith(".openrouter.ai")
+    )
+    request_data = {
+        "model": settings.summary_model,
+        "temperature": 0.2,
+        "max_tokens": 1500,
+        "messages": [
+            {"role": "system", "content": "Summarize gameplay transcripts faithfully."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    if uses_openrouter:
+        request_data["reasoning"] = {"effort": "low", "exclude": True}
     async with httpx.AsyncClient(
         timeout=60,
         headers={
@@ -117,16 +133,7 @@ async def summarize_letsplay(title: str, transcript: str) -> str:
     ) as client:
         response = await client.post(
             completion_url,
-            json={
-                "model": settings.summary_model,
-                "temperature": 0.2,
-                "max_tokens": 1500,
-                "reasoning": {"effort": "low", "exclude": True},
-                "messages": [
-                    {"role": "system", "content": "Summarize gameplay transcripts faithfully."},
-                    {"role": "user", "content": prompt},
-                ],
-            },
+            json=request_data,
         )
         response.raise_for_status()
         payload = response.json()

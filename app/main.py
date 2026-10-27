@@ -983,8 +983,8 @@ async def translate_game(
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "OpenRouter отклонил API-ключ (401). Проверьте OPENROUTER_API_KEY "
-                    "и LLM_API_KEY в .env, затем пересоздайте контейнеры приложения."
+                    "Провайдер отклонил API-ключ (401). Проверьте GROQ_API_KEY "
+                    "в .env и пересоздайте контейнеры приложения."
                 ),
             ) from exc
         if provider_status == 403:
@@ -992,7 +992,7 @@ async def translate_game(
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "OpenRouter запретил запрос (403). Проверьте доступ ключа и "
+                    "Провайдер запретил запрос (403). Проверьте доступ ключа и "
                     "доступность выбранных моделей в аккаунте."
                 ),
             ) from exc

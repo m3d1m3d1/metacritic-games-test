@@ -18,11 +18,11 @@ class Settings(BaseSettings):
     llm_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices(
-            "LLM_API_KEY", "OPENROUTER_API_KEY", "SILICONFLOW_API_KEY"
+            "GROQ_API_KEY", "LLM_API_KEY", "OPENROUTER_API_KEY", "SILICONFLOW_API_KEY"
         ),
     )
-    llm_api_base_url: str = "https://openrouter.ai/api/v1"
-    summary_model: str = "nvidia/nemotron-3.5-super-vl:free"
+    llm_api_base_url: str = "https://api.groq.com/openai/v1"
+    summary_model: str = "openai/gpt-oss-120b"
     summary_fallback_models: str = (
         "google/gemma-4-26b-a4b-it:free,"
         "google/gemma-4-31b-it:free"

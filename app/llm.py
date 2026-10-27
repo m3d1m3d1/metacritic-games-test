@@ -186,7 +186,6 @@ async def summarize_reviews(page: ReviewsPage) -> ReviewSummaryResult:
                 request_data = {
                     "temperature": 0.2,
                     "max_tokens": 3000,
-                    "reasoning": {"effort": "low", "exclude": True},
                     "response_format": {"type": "json_object"},
                     "messages": [
                         {
@@ -202,6 +201,7 @@ async def summarize_reviews(page: ReviewsPage) -> ReviewSummaryResult:
                 }
                 if fallback_models:
                     request_data["models"] = fallback_models
+                    request_data["reasoning"] = {"effort": "low", "exclude": True}
                 else:
                     request_data["model"] = settings.summary_model
                 response = await client.post(
@@ -290,7 +290,6 @@ async def translate_game_content(
                 request_data = {
                     "temperature": 0.2,
                     "max_tokens": 6000,
-                    "reasoning": {"effort": "low", "exclude": True},
                     "response_format": {"type": "json_object"},
                     "messages": [
                         {
@@ -305,6 +304,7 @@ async def translate_game_content(
                 }
                 if fallback_models:
                     request_data["models"] = fallback_models
+                    request_data["reasoning"] = {"effort": "low", "exclude": True}
                 else:
                     request_data["model"] = settings.summary_model
                 response = await client.post(completion_url, json=request_data)

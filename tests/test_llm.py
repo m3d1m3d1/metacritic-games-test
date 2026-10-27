@@ -98,6 +98,64 @@ async def test_summarize_reviews_uses_openai_compatible_chat_completions(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_summarize_reviews_uses_groq_without_openrouter_parameters(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "model": "openai/gpt-oss-120b",
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"summary":"Critics praise the combat.",'
+                                '"likes":["Responsive combat"],"dislikes":[]}'
+                            )
+                        }
+                    }
+                ],
+            }
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, path, json):
+            calls.append((path, json))
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "summary_model", "openai/gpt-oss-120b")
+    monkeypatch.setattr(settings, "llm_api_base_url", "https://api.groq.com/openai/v1")
+    monkeypatch.setattr(settings, "llm_api_key", "groq-test-key")
+    monkeypatch.setattr(llm.httpx, "AsyncClient", FakeHTTPClient)
+
+    result = await llm.summarize_reviews(
+        ReviewsPage(
+            kind="critic",
+            platform="pc",
+            reviews=[Review(kind="critic", text="Responsive combat.")],
+        )
+    )
+
+    assert result.summary == "Critics praise the combat."
+    assert calls[0][0] == "https://api.groq.com/openai/v1/chat/completions"
+    assert calls[0][1]["model"] == "openai/gpt-oss-120b"
+    assert calls[0][1]["response_format"] == {"type": "json_object"}
+    assert "models" not in calls[0][1]
+    assert "reasoning" not in calls[0][1]
+
+
+@pytest.mark.asyncio
 async def test_summarize_reviews_requires_api_key(monkeypatch):
     monkeypatch.setattr(settings, "llm_api_key", None)
 
@@ -184,6 +242,60 @@ async def test_translate_game_content_uses_free_model_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_translate_game_content_uses_groq_without_openrouter_parameters(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"description":"Описание игры.",'
+                                '"letsplay_summary":null,"summaries":[]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, path, json):
+            calls.append((path, json))
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "summary_model", "openai/gpt-oss-120b")
+    monkeypatch.setattr(settings, "llm_api_base_url", "https://api.groq.com/openai/v1")
+    monkeypatch.setattr(settings, "llm_api_key", "groq-test-key")
+    monkeypatch.setattr(llm.httpx, "AsyncClient", FakeHTTPClient)
+
+    result = await llm.translate_game_content(
+        description="Game description",
+        letsplay_summary=None,
+        summaries=[],
+    )
+
+    assert result.description == "Описание игры."
+    assert calls[0][0] == "https://api.groq.com/openai/v1/chat/completions"
+    assert calls[0][1]["model"] == "openai/gpt-oss-120b"
+    assert "models" not in calls[0][1]
+    assert "reasoning" not in calls[0][1]
+
+
+@pytest.mark.asyncio
 async def test_openrouter_fallback_rejects_paid_models(monkeypatch):
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
     monkeypatch.setattr(settings, "llm_api_base_url", "https://openrouter.ai/api/v1")
@@ -267,6 +379,7 @@ async def test_summarize_reviews_retries_empty_model_content(monkeypatch):
 
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
     monkeypatch.setattr(settings, "llm_api_base_url", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(settings, "summary_model", "primary:free")
     monkeypatch.setattr(llm.httpx, "AsyncClient", FakeHTTPClient)
     monkeypatch.setattr(llm.asyncio, "sleep", no_wait)
 

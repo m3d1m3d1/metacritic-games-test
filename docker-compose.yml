@@ -29,11 +29,9 @@ services:
       CRAWL_MAX_FAILURES_PER_DAY: ${CRAWL_MAX_FAILURES_PER_DAY:-2}
       METACRITIC_MAX_CONCURRENCY: ${METACRITIC_MAX_CONCURRENCY:-2}
       TIMEZONE: ${TIMEZONE:-UTC}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      LLM_API_KEY: ${LLM_API_KEY:-${OPENROUTER_API_KEY:-}}
-      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-https://openrouter.ai/api/v1}
-      SUMMARY_MODEL: ${SUMMARY_MODEL:-nvidia/nemotron-3.5-super-vl:free}
-      SUMMARY_FALLBACK_MODELS: ${SUMMARY_FALLBACK_MODELS-google/gemma-4-26b-a4b-it:free,google/gemma-4-31b-it:free}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-https://api.groq.com/openai/v1}
+      SUMMARY_MODEL: ${SUMMARY_MODEL:-openai/gpt-oss-120b}
       METACRITIC_PROXY: ${METACRITIC_PROXY:-}
       YOUTUBE_ENRICHMENT_ENABLED: ${YOUTUBE_ENRICHMENT_ENABLED:-true}
     depends_on:
